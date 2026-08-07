@@ -1,4 +1,4 @@
-// video_wallpaper.cpp
+// video_wallpaper.cpp (mpv 版本，交互式菜单，无拖拽提示)
 // 编译: g++ -municode -DUNICODE -D_UNICODE -o wallpaper.exe main.cpp -luser32 -lshell32 -lshlwapi
 
 #define WIN32_LEAN_AND_MEAN
@@ -9,24 +9,53 @@
 #include <cstdio>
 #include <cwchar>
 #include <vector>
+#include <iostream>
 
-// 全局变量：保存被隐藏的壁纸层 WorkerW 句柄
+// 全局变量
 static HWND g_hiddenWorkerW = NULL;
+static HANDLE g_mpvProcess = NULL;
+static HWND g_mpvWindow = NULL;
+static bool g_isWallpaperMode = false;
 
-// 辅助函数
-bool IsFFmpegInstalled() {
+// 辅助函数，查找mpv.exe
+std::wstring FindMPVExe() {
     wchar_t path[MAX_PATH];
-    return SearchPathW(NULL, L"ffmpeg.exe", NULL, MAX_PATH, path, NULL) > 0;
+    if (SearchPathW(NULL, L"mpv.exe", NULL, MAX_PATH, path, NULL) > 0) {
+        return std::wstring(path);
+    }
+
+    std::vector<std::wstring> commonDirs = {
+        L"C:\\Program Files\\MPV Player",
+        L"C:\\Program Files (x86)\\MPV Player",
+        L"C:\\Program Files\\mpv",
+        L"C:\\Program Files (x86)\\mpv",
+        L"%LOCALAPPDATA%\\Programs\\mpv",
+    };
+
+    for (auto &dir : commonDirs) {
+        wchar_t expanded[MAX_PATH];
+        ExpandEnvironmentStringsW(dir.c_str(), expanded, MAX_PATH);
+        wchar_t fullPath[MAX_PATH];
+        swprintf_s(fullPath, L"%s\\mpv.exe", expanded);
+        if (GetFileAttributesW(fullPath) != INVALID_FILE_ATTRIBUTES) {
+            return std::wstring(fullPath);
+        }
+    }
+    return L"";
 }
 
-bool InstallFFmpegWithWinget() {
-    wprintf(L"[*] 正在使用 winget 安装 ffmpeg...\n");
+bool IsMPVInstalled() {
+    return !FindMPVExe().empty();
+}
+
+bool InstallMPVWithWinget() {
+    wprintf(L"[*] 正在使用 winget 安装 mpv...\n");
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
-    wchar_t cmd[] = L"winget install ffmpeg --accept-package-agreements --accept-source-agreements";
+    wchar_t cmd[] = L"winget install mpv --accept-package-agreements --accept-source-agreements";
     BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     if (!ok) {
-        wprintf(L"[!] winget 启动失败，请手动安装 ffmpeg\n");
+        wprintf(L"[!] winget 启动失败，请手动安装 mpv (winget install mpv)\n");
         return false;
     }
     WaitForSingleObject(pi.hProcess, 60000);
@@ -34,7 +63,13 @@ bool InstallFFmpegWithWinget() {
     GetExitCodeProcess(pi.hProcess, &exitCode);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    return exitCode == 0;
+    if (exitCode == 0) {
+        wprintf(L"[+] mpv 安装成功\n");
+        return true;
+    } else {
+        wprintf(L"[!] mpv 安装失败，请手动安装 (winget install mpv 或从官网下载)\n");
+        return false;
+    }
 }
 
 // 触发Progman分裂
@@ -53,73 +88,82 @@ bool SpawnWorkerW() {
     return ret != 0;
 }
 
-// 启动ffplay
-HANDLE StartFFPlay(const std::wstring& videoPath) {
+// 启动mpv
+HANDLE StartMPV(const std::wstring& videoPath) {
     int w = GetSystemMetrics(SM_CXSCREEN);
     int h = GetSystemMetrics(SM_CYSCREEN);
-    wchar_t cmdLine[2048];
-    wsprintfW(cmdLine, L"ffplay -loop 0 -window_title \"VideoWallpaper\" -x %d -y %d -noborder \"%s\"",
-              w, h, videoPath.c_str());
+
+    wchar_t cmdLine[4096];
+    swprintf_s(cmdLine,
+        L"\"%s\" --loop-file=inf --geometry=%dx%d --no-border --keepaspect=no "
+        L"--no-osc --no-osd-bar --osd-level=0 --cursor-autohide=always "
+        L"--hwdec=auto --vo=gpu-next --gpu-api=d3d11 --profile=fast "
+        L"--cache=yes --demuxer-max-bytes=2048MiB --video-sync=display-resample "
+        L"--ontop --title=\"VideoWallpaper\" \"%s\"",
+        FindMPVExe().c_str(), w, h, videoPath.c_str()
+    );
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
-    if (!CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        wprintf(L"[!] 启动 ffplay 失败\n");
+    if (!CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        wprintf(L"[!] 启动 mpv 失败 (错误码: %lu)\n", GetLastError());
         return NULL;
     }
     CloseHandle(pi.hThread);
     return pi.hProcess;
 }
 
-HWND FindFFPlayWindow() {
-    // 先尝试用标题精确查找
-    HWND hwnd = FindWindowW(L"SDL_app", L"VideoWallpaper");
-    if (hwnd && IsWindow(hwnd)) {
-        // 验证进程是否为 ffplay
+HWND FindMPVWindow(DWORD processId) {
+    HWND found = NULL;
+    struct EnumData {
+        DWORD pid;
+        HWND* out;
+    } data = { processId, &found };
+
+    EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+        auto* pData = (EnumData*)lParam;
         DWORD pid;
         GetWindowThreadProcessId(hwnd, &pid);
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-        if (hProcess) {
-            wchar_t exePath[MAX_PATH];
-            DWORD size = MAX_PATH;
-            if (QueryFullProcessImageNameW(hProcess, 0, exePath, &size)) {
-                if (wcsstr(exePath, L"ffplay.exe") != NULL) {
-                    CloseHandle(hProcess);
-                    return hwnd;
-                }
-            }
-            CloseHandle(hProcess);
-        }
-    }
-
-    // 若精确标题没找到，则枚举所有 SDL_app 窗口，验证进程
-    HWND found = NULL;
-    EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
-        wchar_t cls[64];
-        if (GetClassNameW(hwnd, cls, 64) && wcscmp(cls, L"SDL_app") == 0) {
-            DWORD pid;
-            GetWindowThreadProcessId(hwnd, &pid);
-            HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-            if (hProcess) {
-                wchar_t exePath[MAX_PATH];
-                DWORD size = MAX_PATH;
-                if (QueryFullProcessImageNameW(hProcess, 0, exePath, &size)) {
-                    if (wcsstr(exePath, L"ffplay.exe") != NULL) {
-                        *((HWND*)lParam) = hwnd;
-                        CloseHandle(hProcess);
-                        return FALSE; // 找到，停止枚举
-                    }
-                }
-                CloseHandle(hProcess);
+        if (pid == pData->pid) {
+            wchar_t cls[64];
+            GetClassNameW(hwnd, cls, 64);
+            if (wcsstr(cls, L"mpv") != NULL) {
+                *pData->out = hwnd;
+                return FALSE;
             }
         }
         return TRUE;
-    }, (LPARAM)&found);
+    }, (LPARAM)&data);
 
     return found;
 }
 
-// 隐藏壁纸层 WorkerW (WorkerW2)
+HANDLE StartAndWaitForMPV(const std::wstring& videoPath, HWND* outWindow) {
+    HANDLE hProcess = StartMPV(videoPath);
+    if (!hProcess) return NULL;
+
+    DWORD pid = GetProcessId(hProcess);
+    HWND hwnd = NULL;
+    for (int i = 0; i < 10; ++i) {
+        Sleep(500);
+        hwnd = FindMPVWindow(pid);
+        if (hwnd) break;
+    }
+    if (!hwnd) {
+        wprintf(L"[!] 未找到 mpv 窗口（进程 PID=%lu）\n", pid);
+        TerminateProcess(hProcess, 0);
+        CloseHandle(hProcess);
+        return NULL;
+    }
+
+    ShowWindow(hwnd, SW_HIDE);
+    wprintf(L"[+] 找到 mpv 窗口并已隐藏: 0x%p\n", hwnd);
+
+    *outWindow = hwnd;
+    return hProcess;
+}
+
+// 隐藏/恢复WorkerW
 void HideWallpaperWorkerW() {
     HWND hWorkerIcon = NULL;
     EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
@@ -139,197 +183,252 @@ void HideWallpaperWorkerW() {
         return;
     }
 
-    // 找下一个 WorkerW（壁纸层）
     HWND hWorkerWallpaper = FindWindowExW(NULL, hWorkerIcon, L"WorkerW", NULL);
     if (hWorkerWallpaper) {
         ShowWindow(hWorkerWallpaper, SW_HIDE);
-        g_hiddenWorkerW = hWorkerWallpaper;  // 保存句柄
+        g_hiddenWorkerW = hWorkerWallpaper;
         wprintf(L"[调试] 已隐藏壁纸层 WorkerW (0x%p)\n", hWorkerWallpaper);
     } else {
-        wprintf(L"[!] 未找到壁纸层 WorkerW (WorkerW2)\n");
+        wprintf(L"[!] 未找到壁纸层 WorkerW\n");
         g_hiddenWorkerW = NULL;
     }
 }
 
-// 恢复壁纸层 WorkerW（仅恢复我们隐藏的那个） 
 void ShowWallpaperWorkerW() {
     if (g_hiddenWorkerW && IsWindow(g_hiddenWorkerW)) {
         ShowWindow(g_hiddenWorkerW, SW_SHOW);
         wprintf(L"[调试] 已恢复壁纸层 WorkerW (0x%p)\n", g_hiddenWorkerW);
         g_hiddenWorkerW = NULL;
     } else {
-        wprintf(L"[!] 没有找到之前隐藏的 WorkerW，尝试枚举显示所有隐藏的 WorkerW（不推荐）\n");
-        // 作为后备，显示所有隐藏的 WorkerW（但可能导致问题，这里留空）
+        wprintf(L"[!] 没有找到之前隐藏的 WorkerW\n");
     }
 }
 
-// 恢复静态壁纸 
-void RestoreStaticWallpaper(HANDLE ffplayProcess, HWND videoWnd) {
-    wprintf(L"[*] 正在恢复静态壁纸...\n");
-
-    // 销毁视频窗口
-    if (videoWnd && IsWindow(videoWnd)) {
-        // 先解除父子关系，防止父窗口残留
-        SetParent(videoWnd, NULL);
-        PostMessageW(videoWnd, WM_CLOSE, 0, 0);
-        Sleep(200);
-    }
-
-    // 终止 ffplay 进程
-    if (ffplayProcess) {
-        TerminateProcess(ffplayProcess, 0);
-        CloseHandle(ffplayProcess);
-    }
-
-    // 恢复壁纸层
-    ShowWallpaperWorkerW();
-
-    // 刷新桌面
-    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0, SMTO_NORMAL, 1000, NULL);
-    wprintf(L"[+] 已恢复静态壁纸\n");
-}
-
-// 用户交互 
-bool AskUserRestore() {
-    wprintf(L"\n是否恢复静态壁纸？(y/n): ");
-    wchar_t ch;
-    wscanf_s(L" %c", &ch, 1);
-    return (ch == L'y' || ch == L'Y');
-}
-
-bool IsKeyPressed(int vKey) {
-    return (GetAsyncKeyState(vKey) & 0x8000) != 0;
-}
-
-// 主函数 
-int wmain(int argc, wchar_t* argv[]) {
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-    setlocale(LC_ALL, "zh-CN.UTF-8");
-
-    wprintf(L"========================================\n");
-    wprintf(L"  视频壁纸工具 (基于 0x52C 消息)\n");
-    wprintf(L"========================================\n\n");
-
-    if (argc < 2) {
-        wprintf(L"用法: %ls <视频文件路径>\n", argv[0]);
-        wprintf(L"示例: %ls C:\\videos\\wallpaper.mp4\n", argv[0]);
-        return 1;
-    }
-
-    std::wstring videoPath = argv[1];
-    if (GetFileAttributesW(videoPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        wprintf(L"[!] 视频文件不存在: %ls\n", videoPath.c_str());
-        return 1;
-    }
-
-    // 检查 ffmpeg 
-    wprintf(L"[*] 检测 ffmpeg 环境...\n");
-    if (!IsFFmpegInstalled()) {
-        wprintf(L"[!] 未找到 ffmpeg，尝试自动安装...\n");
-        if (!InstallFFmpegWithWinget()) {
-            wprintf(L"[!] 自动安装失败，请手动安装: winget install ffmpeg\n");
-            return 1;
+// 设置壁纸
+bool SetupWallpaper(const std::wstring& videoPath) {
+    if (g_isWallpaperMode) {
+        wprintf(L"[*] 正在更换壁纸，终止旧的 mpv...\n");
+        if (g_mpvProcess) {
+            TerminateProcess(g_mpvProcess, 0);
+            CloseHandle(g_mpvProcess);
+            g_mpvProcess = NULL;
         }
-        if (!IsFFmpegInstalled()) {
-            wprintf(L"[!] 安装后仍无法检测到 ffmpeg，请检查 PATH\n");
-            return 1;
+        if (g_mpvWindow && IsWindow(g_mpvWindow)) {
+            SetParent(g_mpvWindow, NULL);
+            PostMessageW(g_mpvWindow, WM_CLOSE, 0, 0);
+            g_mpvWindow = NULL;
         }
-    }
-    wprintf(L"[+] ffmpeg 已就绪\n");
-
-    // 启动 ffplay 
-    wprintf(L"[*] 启动视频播放 (循环)...\n");
-    HANDLE ffplayProcess = StartFFPlay(videoPath);
-    if (!ffplayProcess) {
-        wprintf(L"[!] 启动 ffplay 失败\n");
-        return 1;
+        g_isWallpaperMode = false;
     }
 
-    HWND videoWnd = NULL;
-    for (int i = 0; i < 10; ++i) {
-        Sleep(500);
-        videoWnd = FindFFPlayWindow();
-        if (videoWnd) break;
+    wprintf(L"[*] 启动 mpv (循环播放)...\n");
+    g_mpvProcess = StartAndWaitForMPV(videoPath, &g_mpvWindow);
+    if (!g_mpvProcess) {
+        wprintf(L"[!] 启动 mpv 失败\n");
+        return false;
     }
-    if (!videoWnd) {
-        wprintf(L"[!] 未找到 ffplay 窗口\n");
-        TerminateProcess(ffplayProcess, 0);
-        CloseHandle(ffplayProcess);
-        return 1;
-    }
-    wprintf(L"[+] 找到视频窗口: 0x%p\n", videoWnd);
 
-    // 获取 Progman 
     HWND hProgman = FindWindowW(L"Progman", NULL);
     if (!hProgman) {
         wprintf(L"[!] 未找到 Progman 窗口\n");
-        TerminateProcess(ffplayProcess, 0);
-        CloseHandle(ffplayProcess);
-        return 1;
+        if (g_mpvProcess) { TerminateProcess(g_mpvProcess, 0); CloseHandle(g_mpvProcess); g_mpvProcess = NULL; }
+        return false;
     }
     wprintf(L"[+] 找到 Progman: 0x%p\n", hProgman);
 
-    // 发送 0x52C 
     wprintf(L"[*] 触发桌面窗口分裂 (0x52C)...\n");
     if (!SpawnWorkerW()) {
         wprintf(L"[!] 发送 0x52C 失败，可能系统不支持 (Win11 24H2+ 已修改)\n");
     }
     Sleep(500);
 
-    // 将视频窗口挂到 Progman 
-    wprintf(L"[*] 将视频窗口挂到 Progman...\n");
-    LONG style = GetWindowLongW(videoWnd, GWL_STYLE);
+    wprintf(L"[*] 将 mpv 窗口挂到 Progman...\n");
+    LONG style = GetWindowLongW(g_mpvWindow, GWL_STYLE);
     style &= ~(WS_POPUP | WS_CAPTION | WS_BORDER | WS_THICKFRAME);
     style |= WS_CHILD | WS_CLIPCHILDREN | WS_VISIBLE;
-    SetWindowLongW(videoWnd, GWL_STYLE, style);
+    SetWindowLongW(g_mpvWindow, GWL_STYLE, style);
 
-    SetParent(videoWnd, hProgman);
+    SetParent(g_mpvWindow, hProgman);
     RECT rect;
     GetClientRect(hProgman, &rect);
-    SetWindowPos(videoWnd, HWND_TOP, 0, 0, rect.right, rect.bottom,
+    SetWindowPos(g_mpvWindow, HWND_TOP, 0, 0, rect.right, rect.bottom,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    ShowWindow(videoWnd, SW_SHOW);
-    wprintf(L"[+] 视频窗口已挂到 Progman\n");
 
-    // 隐藏壁纸层 WorkerW 
+    ShowWindow(g_mpvWindow, SW_SHOW);
+    wprintf(L"[+] mpv 窗口已挂到 Progman 并显示\n");
+
     wprintf(L"[*] 隐藏壁纸层 WorkerW...\n");
     HideWallpaperWorkerW();
 
+    g_isWallpaperMode = true;
     wprintf(L"\n[+] 动态壁纸已启动！\n");
-    wprintf(L"[*] 按 ESC 或 Q 退出程序\n\n");
+    return true;
+}
 
-    // 等待退出事件 
-    bool shouldQuit = false;
-    while (!shouldQuit) {
-        if (IsKeyPressed(VK_ESCAPE) || IsKeyPressed('Q')) {
-            shouldQuit = true;
-            break;
+// 恢复壁纸
+void RestoreWallpaper() {
+    wprintf(L"[*] 正在恢复静态壁纸...\n");
+    if (g_mpvProcess) {
+        TerminateProcess(g_mpvProcess, 0);
+        CloseHandle(g_mpvProcess);
+        g_mpvProcess = NULL;
+    }
+    if (g_mpvWindow && IsWindow(g_mpvWindow)) {
+        SetParent(g_mpvWindow, NULL);
+        PostMessageW(g_mpvWindow, WM_CLOSE, 0, 0);
+        g_mpvWindow = NULL;
+    }
+    ShowWallpaperWorkerW();
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0, SMTO_NORMAL, 1000, NULL);
+    g_isWallpaperMode = false;
+    wprintf(L"[+] 已恢复静态壁纸\n");
+}
+
+// 获取视频路径
+std::wstring GetVideoPathFromUser() {
+    wprintf(L"\n请输入视频文件路径: ");
+    std::wstring path;
+    std::getline(std::wcin, path);
+    // 去除首尾引号（如果有）
+    if (!path.empty() && path.front() == L'\"') path.erase(0, 1);
+    if (!path.empty() && path.back() == L'\"') path.pop_back();
+    return path;
+}
+
+// 显示菜单
+void ShowMenu() {
+    wprintf(L"\n========================================\n");
+    wprintf(L"  动态壁纸菜单\n");
+    wprintf(L"========================================\n");
+    wprintf(L"1. 恢复静态壁纸（程序继续运行）\n");
+    wprintf(L"2. 退出程序（保留动态壁纸）\n");
+    wprintf(L"3. 退出程序并恢复静态壁纸\n");
+    wprintf(L"4. 设置新壁纸\n");
+    wprintf(L"请选择 (1-4): ");
+}
+
+// 主函数
+int wmain(int argc, wchar_t* argv[]) {
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    setlocale(LC_ALL, "zh-CN.UTF-8");
+
+    wprintf(L"========================================\n");
+    wprintf(L"  视频壁纸工具 (mpv) - 交互式菜单版\n");
+    wprintf(L"========================================\n\n");
+
+    // 检测mpv
+    wprintf(L"[*] 检测 mpv 环境...\n");
+    if (!IsMPVInstalled()) {
+        wprintf(L"[!] 未找到 mpv，尝试自动安装...\n");
+        if (!InstallMPVWithWinget()) {
+            wprintf(L"[!] 自动安装失败，请手动安装 mpv (winget install mpv 或从官网下载)\n");
+            return 1;
+        }
+        if (!IsMPVInstalled()) {
+            wprintf(L"[!] 安装后仍无法找到 mpv，请确保已添加到 PATH 或安装到标准目录\n");
+            return 1;
+        }
+    }
+    wprintf(L"[+] mpv 已就绪 (路径: %ls)\n", FindMPVExe().c_str());
+
+    // 主循环
+    bool shouldExit = false;
+    while (!shouldExit) {
+        std::wstring videoPath;
+
+        if (argc >= 2) {
+            videoPath = argv[1];
+            argc = 1; // 只使用一次
+        } else {
+            videoPath = GetVideoPathFromUser();
+            if (videoPath.empty()) {
+                wprintf(L"[!] 路径为空，请重新输入或按 Ctrl+C 退出\n");
+                continue;
+            }
         }
 
-        DWORD exitCode;
-        if (GetExitCodeProcess(ffplayProcess, &exitCode) && exitCode != STILL_ACTIVE) {
-            wprintf(L"\n[*] ffplay 已退出 (代码: %lu)\n", exitCode);
-            shouldQuit = true;
-            break;
+        if (GetFileAttributesW(videoPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            wprintf(L"[!] 视频文件不存在: %ls\n", videoPath.c_str());
+            if (argc == 1) {
+                wprintf(L"[!] 无效的视频文件，程序退出\n");
+                return 1;
+            }
+            continue;
         }
 
-        Sleep(200);
+        if (!SetupWallpaper(videoPath)) {
+            wprintf(L"[!] 设置壁纸失败\n");
+            if (argc == 1) return 1;
+            continue;
+        }
+
+        // 进入菜单
+        bool menuLoop = true;
+        while (menuLoop) {
+            ShowMenu();
+            int choice;
+            std::wcin >> choice;
+            if (std::wcin.fail()) {
+                std::wcin.clear();
+                std::wcin.ignore(1024, L'\n');
+                wprintf(L"[!] 输入无效，请输入数字 1-4\n");
+                continue;
+            }
+
+            switch (choice) {
+                case 1:
+                    RestoreWallpaper();
+                    wprintf(L"[*] 已恢复静态壁纸，您可以再次设置新壁纸。\n");
+                    menuLoop = false;
+                    break;
+
+                case 2:
+                    wprintf(L"[*] 退出程序，保留动态壁纸效果。\n");
+                    shouldExit = true;
+                    menuLoop = false;
+                    break;
+
+                case 3:
+                    RestoreWallpaper();
+                    wprintf(L"[*] 已恢复静态壁纸，程序退出。\n");
+                    shouldExit = true;
+                    menuLoop = false;
+                    break;
+
+                case 4:
+                    wprintf(L"[*] 正在更换壁纸...\n");
+                    if (g_isWallpaperMode) {
+                        if (g_mpvProcess) {
+                            TerminateProcess(g_mpvProcess, 0);
+                            CloseHandle(g_mpvProcess);
+                            g_mpvProcess = NULL;
+                        }
+                        if (g_mpvWindow && IsWindow(g_mpvWindow)) {
+                            SetParent(g_mpvWindow, NULL);
+                            PostMessageW(g_mpvWindow, WM_CLOSE, 0, 0);
+                            g_mpvWindow = NULL;
+                        }
+                        g_isWallpaperMode = false;
+                    }
+                    menuLoop = false;
+                    break;
+
+                default:
+                    wprintf(L"[!] 无效选项，请输入 1-4\n");
+                    break;
+            }
+        }
+
+        if (shouldExit) break;
     }
 
-    // 清理 
-    wprintf(L"\n[*] 正在退出...\n");
-    if (AskUserRestore()) {
-        RestoreStaticWallpaper(ffplayProcess, videoWnd);
-    } else {
-        wprintf(L"[*] 保留当前壁纸设置\n");
-        if (ffplayProcess) CloseHandle(ffplayProcess);
-        // 如果保留，我们需要把 ffplay 窗口从 Progman 中分离，否则下次启动可能冲突。
-        // 这里简单处理：将视频窗口设为桌面子窗口并隐藏（避免干扰）
-        if (videoWnd && IsWindow(videoWnd)) {
-            SetParent(videoWnd, GetDesktopWindow());
-            ShowWindow(videoWnd, SW_HIDE);
-        }
+    // 安全清理（以防残留）
+    if (g_mpvProcess && !shouldExit) {
+        // 这种情况不会发生，但保留
+        TerminateProcess(g_mpvProcess, 0);
+        CloseHandle(g_mpvProcess);
+        g_mpvProcess = NULL;
     }
 
     wprintf(L"[+] 程序结束\n");
