@@ -71,9 +71,6 @@ HANDLE StartFFPlay(const std::wstring& videoPath) {
     return pi.hProcess;
 }
 
-// 查找ffplay窗口
-#include <tlhelp32.h>  // 需要包含此头文件
-
 HWND FindFFPlayWindow() {
     // 先尝试用标题精确查找
     HWND hwnd = FindWindowW(L"SDL_app", L"VideoWallpaper");
