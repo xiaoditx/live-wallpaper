@@ -1,11 +1,14 @@
 # Makefile for live_wallpaper
-# 用法: make [ARCH=64|32] [DEBUG=1] [all|clean|run]
+# 用法: make [ARCH=64|32] [DEBUG=1] [STATIC=1] [all|clean|run]
 
 # 设置代码页为UTF-8
 $(shell chcp 65001 >nul)
 
 # 默认架构
 ARCH ?= 64
+
+# 是否静态链接（默认开启，因为通常发布需要）
+STATIC ?= 1
 
 # 编译器选择
 ifeq ($(ARCH),32)
@@ -22,7 +25,13 @@ ifeq ($(DEBUG),1)
     CXXFLAGS += -g -D_DEBUG
 endif
 
+# 链接标志（基础）
 LDFLAGS  = -mwindows -municode
+# 如果需要静态链接，添加 -static
+ifeq ($(STATIC),1)
+    LDFLAGS += -static
+endif
+
 LDLIBS   = -lgdi32 -luser32 -lshell32 -lcomdlg32 -lshlwapi
 
 # 目标文件
@@ -58,6 +67,6 @@ run: $(TARGET)
 # 帮助
 help:
 	@echo 可用目标: all clean run
-	@echo 变量: ARCH=32/64 (默认64), DEBUG=1 (启用调试)
+	@echo 变量: ARCH=32/64 (默认64), DEBUG=1 (启用调试), STATIC=1/0 (默认1, 静态链接)
 
 .PHONY: all clean run help

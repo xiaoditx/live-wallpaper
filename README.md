@@ -8,8 +8,13 @@
 
 本地编译：
 
+> [!warring]
+> 本地编译前请**一定**要下载MPV的主程序`mpv.exe`到项目根目录
+
 ```powershell
-male
+make
 ```
 
-软件依赖mpv，程序会去检查环境变量和常见路径，没有则会使用winget安装，如果已经安装了mpv且不在常见路径，请确保环境变量配置正确以防二次安装
+## 版权信息
+
+本软件使用了 MPV Player（ https://mpv.io/ ），其源代码可在 https://github.com/mpv-player/mpv 获取，并遵循 GNU General Public License v2 或更高版本。

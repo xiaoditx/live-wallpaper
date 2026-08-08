@@ -96,6 +96,27 @@ static BOOL CALLBACK SetFontToChild(HWND hChild, LPARAM lParam);
 // 查找mpv.exe的路径
 std::wstring FindMPVExe()
 {
+    // 首先检查程序所在目录下的 mpv.exe
+    wchar_t modulePath[MAX_PATH];
+    GetModuleFileNameW(GetModuleHandleW(nullptr), modulePath, MAX_PATH);
+    wchar_t* lastSlash = wcsrchr(modulePath, L'\\');
+    if (lastSlash) {
+        *(lastSlash + 1) = L'\0'; // 截断到目录
+
+        // 检查同目录
+        wchar_t mpvPath[MAX_PATH];
+        swprintf_s(mpvPath, L"%smpv.exe", modulePath);
+        if (GetFileAttributesW(mpvPath) != INVALID_FILE_ATTRIBUTES) {
+            return std::wstring(mpvPath);
+        }
+
+        // 检查子目录 mpv\mpv.exe
+        swprintf_s(mpvPath, L"%smpv\\mpv.exe", modulePath);
+        if (GetFileAttributesW(mpvPath) != INVALID_FILE_ATTRIBUTES) {
+            return std::wstring(mpvPath);
+        }
+    }
+    
     wchar_t path[MAX_PATH];
     // 尝试使用SearchPath查找mpv.exe
     if (SearchPathW(NULL, L"mpv.exe", NULL, MAX_PATH, path, NULL) > 0)
