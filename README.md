@@ -2,13 +2,17 @@
 
 <img alt="LOGO" src="icon.png" width="256" height="256" />
 
-# live wallpaper
+</div>
+
+# 动态壁纸管理器 - live wallpaper
 
 简单的Windows动态壁纸工具
 
+## 构建
+
 本地编译：
 
-> [!warring]
+> [!warning]
 > 本地编译前请**一定**要下载MPV的主程序`mpv.exe`到项目根目录
 
 ```powershell
