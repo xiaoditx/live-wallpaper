@@ -24,11 +24,12 @@ static HWND g_mpvWindow = NULL;        // mpv播放窗口句柄，启动后存�
 static bool g_isWallpaperMode = false; // 当前是否处于壁纸模式
 
 // 其他全局变量
-HWND g_hWnd = nullptr;      // 主窗口句柄
-HWND g_hEdit = nullptr;     // 编辑框句柄
-std::wstring g_filePath;    // 当前选择的视频文件路径
-NOTIFYICONDATAW g_nid = {}; // 托盘图标数据结构
-HFONT g_hFont = nullptr;    // 字体句柄
+HWND g_hWnd = nullptr;                    // 主窗口句柄
+HWND g_hEdit = nullptr;                   // 编辑框句柄
+std::wstring g_filePath;                  // 当前选择的视频文件路径
+NOTIFYICONDATAW g_nid = {};               // 托盘图标数据结构
+HFONT g_hFont = nullptr;                  // 字体句柄
+static WNDPROC g_oldEditProc = nullptr;   // 存放编辑框默认窗口过程地址的指针
 
 // 自定义消息
 #define WM_TRAYICON (WM_USER + 1)
@@ -90,6 +91,7 @@ void AddTrayIcon();
 void RemoveTrayIcon();
 void ShowContextMenu(HWND hWnd);
 static BOOL CALLBACK SetFontToChild(HWND hChild, LPARAM lParam);
+LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 /* ↓↓↓ 壁纸功能实现 ↓↓↓ */
 
@@ -530,6 +532,25 @@ static BOOL CALLBACK SetFontToChild(HWND hChild, LPARAM lParam)
     return TRUE;
 }
 
+// 编辑框子类窗口过程
+LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wParam == VK_RETURN)
+    {
+        // 用户按下回车，向父窗口发送“应用”命令（ID=3）
+        SendMessage(GetParent(hWnd), WM_COMMAND, 3, 0);
+        return 0;   // 阻止默认处理（避免系统提示音）
+    }
+    // 拦截字符消息中的回车以消除系统提示音
+    if (msg == WM_CHAR && wParam == VK_RETURN)
+    {
+        return 0;  // 拦截消息，不交给默认回调处理
+    }
+
+    // 其他消息继续交给原窗口过程
+    return CallWindowProc(g_oldEditProc, hWnd, msg, wParam, lParam);
+}
+
 // 窗口过程函数，处理窗口消息
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -548,6 +569,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_hEdit = CreateWindowW(L"EDIT", L"",
                                 WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
                                 100, 30, 300, 25, hWnd, (HMENU)1, GetModuleHandleW(nullptr), nullptr);
+
+        // 子类化编辑框，拦截键盘消息
+        g_oldEditProc = (WNDPROC)SetWindowLongPtr(g_hEdit, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
         // 创建“选择文件”按钮控件
         CreateWindowW(L"BUTTON", L"选择文件",
