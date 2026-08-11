@@ -2,7 +2,7 @@
 ; 有关创建 Inno Setup 脚本文件的详细资料请查阅帮助文档！
 
 #define MyAppName "Live Wallpaper - 动态壁纸"
-#define MyAppVersion "0.1.2"
+#define MyAppVersion "0.1.4"
 #define MyAppPublisher "小狄同学呀"
 #define MyAppURL "https://github.com/xiaoditx/live-wallpaper/"
 #define MyAppExeName "live_wallpaper.exe"

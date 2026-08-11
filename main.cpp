@@ -24,15 +24,17 @@ static HWND g_mpvWindow = NULL;        // mpv播放窗口句柄，启动后存�
 static bool g_isWallpaperMode = false; // 当前是否处于壁纸模式
 
 // 其他全局变量
-HWND g_hWnd = nullptr;                    // 主窗口句柄
-HWND g_hEdit = nullptr;                   // 编辑框句柄
-std::wstring g_filePath;                  // 当前选择的视频文件路径
-NOTIFYICONDATAW g_nid = {};               // 托盘图标数据结构
-HFONT g_hFont = nullptr;                  // 字体句柄
-static WNDPROC g_oldEditProc = nullptr;   // 存放编辑框默认窗口过程地址的指针
+HWND g_hWnd = nullptr;                  // 主窗口句柄
+HWND g_hEdit = nullptr;                 // 编辑框句柄
+std::wstring g_filePath;                // 当前选择的视频文件路径
+NOTIFYICONDATAW g_nid = {};             // 托盘图标数据结构
+HFONT g_hFont = nullptr;                // 字体句柄
+static WNDPROC g_oldEditProc = nullptr; // 存放编辑框默认窗口过程地址的指针
+UINT g_uMsgShowWindow = 0;              // 自定义 窗口显示 消息的注册结果
 
 // 自定义消息
 #define WM_TRAYICON (WM_USER + 1)
+#define MSG_SHOW_MAIN_WINDOW L"Xiaoditx.live-wallpaper.show_main_window"
 #ifdef DEFINE_GUID
 DEFINE_GUID(GUID_TRAYICON, 0x12345678, 0x1234, 0x1234, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0xEF);
 #endif // DEFINE_GUID
@@ -92,6 +94,7 @@ void RemoveTrayIcon();
 void ShowContextMenu(HWND hWnd);
 static BOOL CALLBACK SetFontToChild(HWND hChild, LPARAM lParam);
 LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+void CenterWindow(HWND hWnd);
 
 /* ↓↓↓ 壁纸功能实现 ↓↓↓ */
 
@@ -101,24 +104,27 @@ std::wstring FindMPVExe()
     // 首先检查程序所在目录下的 mpv.exe
     wchar_t modulePath[MAX_PATH];
     GetModuleFileNameW(GetModuleHandleW(nullptr), modulePath, MAX_PATH);
-    wchar_t* lastSlash = wcsrchr(modulePath, L'\\');
-    if (lastSlash) {
+    wchar_t *lastSlash = wcsrchr(modulePath, L'\\');
+    if (lastSlash)
+    {
         *(lastSlash + 1) = L'\0'; // 截断到目录
 
         // 检查同目录
         wchar_t mpvPath[MAX_PATH];
         swprintf_s(mpvPath, L"%smpv.exe", modulePath);
-        if (GetFileAttributesW(mpvPath) != INVALID_FILE_ATTRIBUTES) {
+        if (GetFileAttributesW(mpvPath) != INVALID_FILE_ATTRIBUTES)
+        {
             return std::wstring(mpvPath);
         }
 
         // 检查子目录 mpv\mpv.exe
         swprintf_s(mpvPath, L"%smpv\\mpv.exe", modulePath);
-        if (GetFileAttributesW(mpvPath) != INVALID_FILE_ATTRIBUTES) {
+        if (GetFileAttributesW(mpvPath) != INVALID_FILE_ATTRIBUTES)
+        {
             return std::wstring(mpvPath);
         }
     }
-    
+
     wchar_t path[MAX_PATH];
     // 尝试使用SearchPath查找mpv.exe
     if (SearchPathW(NULL, L"mpv.exe", NULL, MAX_PATH, path, NULL) > 0)
@@ -524,6 +530,21 @@ void ShowContextMenu(HWND hWnd)
     PostMessageW(hWnd, WM_NULL, 0, 0);
 }
 
+void CenterWindow(HWND hWnd)
+{
+    RECT rect;
+    int scrWidth = GetSystemMetrics(SM_CXSCREEN);  // 获取屏幕宽度
+    int scrHeight = GetSystemMetrics(SM_CYSCREEN); // 获取屏幕高度
+    GetWindowRect(hWnd, &rect);                    // 获取窗口位置
+    // 计算居中位置
+    int width = rect.right - rect.left;  // 窗口宽度
+    int height = rect.bottom - rect.top; // 窗口高度
+    int x = (scrWidth - width) / 2;      // 计算X坐标
+    int y = (scrHeight - height) / 2;    // 计算Y坐标
+    // 设置窗口位置
+    SetWindowPos(hWnd, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+}
+
 // 设置字体给所有子控件
 static BOOL CALLBACK SetFontToChild(HWND hChild, LPARAM lParam)
 {
@@ -539,12 +560,12 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
     {
         // 用户按下回车，向父窗口发送“应用”命令（ID=3）
         SendMessage(GetParent(hWnd), WM_COMMAND, 3, 0);
-        return 0;   // 阻止默认处理（避免系统提示音）
+        return 0; // 阻止默认处理（避免系统提示音）
     }
     // 拦截字符消息中的回车以消除系统提示音
     if (msg == WM_CHAR && wParam == VK_RETURN)
     {
-        return 0;  // 拦截消息，不交给默认回调处理
+        return 0; // 拦截消息，不交给默认回调处理
     }
 
     // 其他消息继续交给原窗口过程
@@ -554,6 +575,24 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 // 窗口过程函数，处理窗口消息
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    // 先处理自定义消息
+    if (msg == g_uMsgShowWindow)
+    {
+        // 如果窗口最小化，先还原
+        if (IsIconic(hWnd))
+        {
+            ShowWindow(hWnd, SW_RESTORE);
+        }
+        // 确保窗口可见
+        ShowWindow(hWnd, SW_SHOW);
+        // 将窗口置前并激活
+        SetForegroundWindow(hWnd);
+        SetActiveWindow(hWnd);
+        // 窗口居中显示
+        CenterWindow(hWnd);
+        return 0;
+    }
+
     switch (msg)
     {
     case WM_CREATE:
@@ -722,6 +761,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
 
+    /*自定义消息*/
+
+    // 双击任务栏小图标
     case WM_TRAYICON:
     {
         if (lParam == WM_LBUTTONDBLCLK)
@@ -736,6 +778,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
 
+    // 其他消息交由默认窗口过程处理
     default:
         return DefWindowProcW(hWnd, msg, wParam, lParam);
     }
@@ -744,10 +787,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
 {
+    // 主窗口窗口类名称
+    constexpr wchar_t WND_CLASS_NAME[] = L"Xiaoditx.live-wallpaper.mainWindow";
+
+    // 注册自定义消息
+    g_uMsgShowWindow = RegisterWindowMessage(MSG_SHOW_MAIN_WINDOW);
+
+    // 创建互斥体保证单例运行
+    HANDLE hMutex = CreateMutex(NULL, FALSE, L"Xiaoditx.live-wallpaper.singleInstance.{490aa90d-eb05-441a-bffa-27f70ccd3098}");
+
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        // 互斥体已存在，说明已有程序实例在运行
+        HWND hMainWnd = FindWindow(WND_CLASS_NAME, NULL);
+
+        if (hMainWnd)
+        {
+            // 发生窗口消息，要求已经启动的线程显示主窗口并移动到屏幕中央
+            SendMessage(hMainWnd, g_uMsgShowWindow, 0, 0);
+        }
+
+        CloseHandle(hMutex); // 关闭句柄
+        return 0;            // 退出当前实例
+    }
+
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"TrayAppClass";
+    wc.lpszClassName = WND_CLASS_NAME;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 
     // 从资源加载大图标
@@ -761,10 +828,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
     if (!RegisterClassW(&wc))
     {
         MessageBoxW(nullptr, L"窗口类注册失败", L"错误", MB_ICONERROR);
+        CloseHandle(hMutex);
         return 1;
     }
 
-    g_hWnd = CreateWindowW(L"TrayAppClass", L"视频壁纸设置",
+    g_hWnd = CreateWindowW(WND_CLASS_NAME, L"视频壁纸设置",
                            WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
                            CW_USEDEFAULT, CW_USEDEFAULT, 630, 110,
                            nullptr, nullptr, hInstance, nullptr);
@@ -772,6 +840,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
     if (!g_hWnd)
     {
         MessageBoxW(nullptr, L"窗口创建失败", L"错误", MB_ICONERROR);
+        CloseHandle(hMutex);
         return 1;
     }
 
@@ -798,5 +867,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    CloseHandle(hMutex);
     return 0;
 }
